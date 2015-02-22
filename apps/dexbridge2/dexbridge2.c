@@ -114,7 +114,7 @@ static volatile BIT ble_connected;		// bit indicating the BLE module is connecte
 static volatile int start_channel = 0;	// the radio channel we will start looking for packets on.
 static volatile uint32 dly_ms = 0;
 static volatile uint32 pkt_time = 0;
-static volatile uint32 wake_time = 0;
+//static volatile uint32 wake_time = 0;
 static uint8 sleep_mode = 0;
 static uint8 save_IEN0;
 static uint8 save_IEN1;
@@ -298,7 +298,7 @@ void dex_RadioSettings()
 	// Rdata = (256+DRATE_M) x 2 ^ DRATE_E
 	//           ------------------------ x Fref = FRef x (256 + DRATE_M) x 2 ^ (DRATE_E-28)
 	//                2 ^ 28
-	// in our case = 24000000 * (256+17) x 2 ^ (-17) = (24000000 / 131072) * 273 = 49987.79
+	// in our case = 24000000 * (256+17) x 2 ^ (-17) = (24000000 / 131072) * 273 = 49987.79 b/s
 	LoadRFParam(&MDMCFG3, 0x11);				// DRATE_M = 0x11 = 17.
 
     // MDMCFG2.DEM_DCFILT_OFF, 0, enable digital DC blocking filter before
@@ -337,8 +337,9 @@ void dex_RadioSettings()
     //    Carrier Sense Absolute Threshold (Sec 13.10.5).
     //    Carrier Sense Relative Threshold (Sec 13.10.6).
     LoadRFParam(&AGCCTRL2, 0x44);
-    LoadRFParam(&AGCCTRL1, 0x00);
-    LoadRFParam(&AGCCTRL0, 0xB2);
+    //LoadRFParam(&AGCCTRL1, 0x00);
+    LoadRFParam(&AGCCTRL1, 0x80);	//enable relative Carrier Sense of 6db change
+	LoadRFParam(&AGCCTRL0, 0xB2);
 
     // Frequency Synthesizer registers that are not fully documented.
     LoadRFParam(&FSCAL3, 0xA9); 
@@ -356,6 +357,7 @@ void dex_RadioSettings()
     LoadRFParam(&PKTCTRL1, 0x04); 
     LoadRFParam(&PKTCTRL0, 0x05);		// enable CRC flagging and variable length packets.  Probably could use fix length for our case, since all are same length.
 										// but that would require changing the library code, since it sets up buffers etc etc, and I'm too lazy.
+	LoadRFParam(&PKTLEN, 0x12);			// limit packet length to 18 bytes, which should be the length of the Dexcom packet.
 	
 	//RF_Params[49] = 1;
 }
@@ -368,6 +370,7 @@ uint8 min8(uint8 a, uint8 b)
 }
 
 // _Dexcom_packet - Type Definition of a Dexcom Radio packet
+// actual packet length is 17 bytes, excluding len and checksum, rssi &LQI.  Maybe try fixed length packet handling on receive.
 typedef struct _Dexcom_packet
 {
 	uint8	len;
@@ -501,45 +504,9 @@ ISR (ST, 0)
 }
 */
 
-void goToSleep (uint16 seconds) {
-    unsigned char temp;
-	//uint16 sleep_time = 0;
-	unsigned short sleep_time =0;
+uint32 calcSleep(uint16 seconds) {
 	uint32 diff = 0;
 	uint32 now = 0;
-	//initialise sleep library
-	sleepInit();
-
-    // The wixel docs note that any high output pins consume ~30uA
-    makeAllOutputs(LOW);
-	/*P1_0 = 0;
-	P1DIR |= 1;
-	// make sure HM-1x is depowered.
-	while(P1_0 == 1) { 
-		doServices(0);'
-	}
-	*/
-/*    //IEN0 |= 0x20; // Enable global ST interrupt [IEN0.STIE]
-	save_IEN0 = IEN0;
-	IEN0 = 0xA0; // Enable global ST interrupt [IEN0.EA and IEN0.STIE]
-	save_IEN1 = IEN1;
-	IEN1 &= 0xB0;
-	save_IEN2 = IEN2;
-	IEN2 &= 0xB0;
-    WORIRQ |= 0x10; // enable sleep timer interrupt [EVENT0_MASK]
-*/
-/*	//Ensure we are running the highest possible clock speed.
-	CLKCON |=0x03;
-	CLKCON &= ~0x40;
-	//ensure the HS XOSC is stable before we enter sleep mode.
-	while(!(SLEEP && 0x80)) {}
-
-*/	/* the sleep mode i've chosen is PM2. According to the CC251132 datasheet,
-	typical power consumption from the SoC should be around 0.5uA */
-	/*The SLEEP.MODE will be cleared to 00 by HW when power
-	mode is entered, thus interrupts are enabled during power modes.
-	All interrupts not to be used to wake up from power modes must
-	be disabled before setting SLEEP.MODE!=00.*/
 	diff = seconds;
 	//printf("\r\ndiff: %lu\r\n", diff);
 	diff = diff * 1000;
@@ -547,17 +514,26 @@ void goToSleep (uint16 seconds) {
 	diff = diff - (getMs() - pkt_time);
 	//printf("\r\ndiff - getMs-pkt_time: %lu\r\n", diff);
 	diff = diff/1000;
+	while(diff>seconds)
+		diff-=seconds;
 	//printf("\r\ndiff/1000: %lu\r\n", diff);
-	sleep_time = (unsigned short)diff;
-	//sleep_time = seconds;
+	return diff;
+}
+
+void goToSleep (uint16 seconds) {
+    unsigned char temp;
+	//uint16 sleep_time = 0;
+	unsigned short sleep_time =0;
+	//uint32 diff = 0;
+	//uint32 now = 0;
+	//initialise sleep library
+	sleepInit();
+
+    // The wixel docs note that any high output pins consume ~30uA
+    makeAllOutputs(LOW);
 //	printf("\r\nseconds: %u, sleep_time: %u, now-pkt_time: %lu\r\n", seconds, sleep_time, (getMs()-pkt_time));
 	while(usb_connected && (usbComTxAvailable() < 128)) {
 		usbComService();
-	}
-	if(sleep_time <= 0 || sleep_time > seconds) {
-		do_sleep = 0;
-		pkt_time = 0;
-		return;
 	}
 	is_sleeping = 1;
 
@@ -613,6 +589,7 @@ void goToSleep (uint16 seconds) {
 		IEN1 &= ~0x3F;
 		IEN2 &= ~0x3F;
 		
+		sleep_time = (unsigned short)calcSleep(seconds);
 		WORCTRL |= 0x04; // Reset Sleep Timer
 		temp = WORTIME0;
 		while(temp == WORTIME0); // Wait until a positive 32 kHz edge
@@ -658,6 +635,8 @@ void goToSleep (uint16 seconds) {
 		while(temp == WORTIME0); // Wait until a positive 32 kHz edge
 		temp = WORTIME0;
 		while(temp == WORTIME0); // Wait until a positive 32 kHz edge
+
+		sleep_time = (unsigned short)calcSleep(seconds);
 		WOREVT1 = sleep_time >> 8; // Set EVENT0, high byte
 		WOREVT0 = sleep_time; // Set EVENT0, low byte
 
@@ -692,46 +671,6 @@ void goToSleep (uint16 seconds) {
 		}
 	}
 	is_sleeping = 0;
-	// make sure we are configured to use the correct clock (32.768kHz crystal)
-	//CLKCON &= 0x3F;
-    // Reset timer, update EVENT0, and enter PM2
-    // WORCTRL[2] = Reset Timer
-    // WORCTRL[1:0] = Sleep Timer resolution
-    // 00 = 1 period
-    // 01 = 2^5 periods
-    // 10 = 2^10 periods
-    // 11 = 2^15 periods
-
-    // t(event0) = (1/32768)*(WOREVT1 << 8 + WOREVT0) * timer res
-    // e.g. WOREVT1=0,WOREVT0=1,res=2^15 ~= 0.9766 second
-	
-/*
-    WORCTRL |= 0x03; // 2^15 periods
-    WORCTRL |= 0x04; // Reset
-    // Wait for 2x+ve edge on 32kHz clock
-    temp = WORTIME0;
-    while (temp == WORTIME0) {};
-    temp = WORTIME0;
-    while (temp == WORTIME0) {};
-*/
-/*    // Wait for 2x+ve edge on 32kHz clock
-    temp = WORTIME0;
-    while (temp == WORTIME0) {};
-//    temp = WORTIME0;
-//    while (temp == WORTIME0) {};
-*/
- /*   WOREVT1 = (sleep_time >> 8);
-    WOREVT0 = (sleep_time & 0xff); //300=293 s
-
-	SLEEP |= sleep_mode;	// set the sleep mode.
-	__asm nop __endasm;		// We have extra NOPs to be safe.
-	__asm nop __endasm;
-	__asm nop __endasm;
-
-	if((SLEEP && sleep_mode) != 0 ) PCON |= 0x01; // PCON.IDLE = 1;
-	// tell everything we are sleeping
-*/
-//	is_sleeping = 1;
 }
 
 void updateLeds()
@@ -846,7 +785,7 @@ void bleConnectMonitor() {
 	} else if (!P1_2 && ble_connected) {
 		last_check = 0;
 		ble_connected = 0;
-	//otherwise, if P1_2 has been high for more than 550ms, we can savely assume we have ble_connected, so say so.
+	//otherwise, if P1_2 has been high for more than 550ms, we can safely assume we have ble_connected, so say so.
 	} else if (P1_2 && last_check && ((getMs() - timer)>550)) {
 		ble_connected = 1;
 	}
@@ -1086,12 +1025,6 @@ int doServices(uint8 bWithProtocol)
 	bleConnectMonitor();
 	if(bWithProtocol)
 		return controlProtocolService();
-	if(!sent_beacon) {
-		if(ble_connected) {
-			sendBeacon();
-			sent_beacon = 1;
-		}
-	}
 	return 1;
 }
 
@@ -1314,7 +1247,7 @@ void main()
 	dex_tx_id = *(uint32 XDATA *)FLASH_TX_ID;
 	if(dex_tx_id >= 0xFFFFFFFF) dex_tx_id = 0;
 	// store the time we woke up.
-	wake_time = getMs();
+	//wake_time = getMs();
 	// if dex_tx_id is zero, we do not have an ID to filter on.  So, we keep sending a beacon every 5 seconds until it is set.
 	// Comment out this while loop if you wish to use promiscuous mode and receive all Dexcom tx packets from any source (inadvisable).
 	// Promiscuous mode is allowed in waitForPacket() function (dex_tx_id == 0, will match any dexcom packet).  Just don't send the 
@@ -1327,36 +1260,28 @@ void main()
 		//wait 5 seconds
 		waitDoingServices(10000, dex_tx_id_set, 1);
 	}
-	sent_beacon=1;
+	sent_beacon = 1;
 	// MAIN LOOP
 	while (1)
 	{
-		//clear the Pkt store.
 		Dexcom_packet Pkt;
+		//send our current dex_tx_id to the app, to let it know what we are looking for.  Only do this when we wake up (sent_beacon is false).
+		if(ble_connected && !sent_beacon) {
+			sendBeacon();
+		}
+		//clear the Pkt store.
 		memset(&Pkt, 0, sizeof(Dexcom_packet));
 		//make sure HM01x is powered on.  We wait until it is.
 		//while (!P1_0);
 
-		//send our current dex_tx_id to the app, to let it know what we are looking for.  Only do this when we wake up (sent_beacon is false).
-/*		if(!sent_beacon) {
-//			printf("send beacon\r\n");
-			while (!ble_connected) {
-				setDigitalOutput(10,HIGH);
-//				printf("beacon waiting\r\n");
-				waitDoingServices(500, ble_connected,0);
-			}
-			// let HM-1x module settle for a second, and hopefully connect.
-			sendBeacon();
-			sent_beacon = 1;
-		}
-*/		LED_RED(0);
+		LED_RED(0);
 		//continue to loop until we get a packet
-		while(!get_packet(&Pkt))
+		if(!get_packet(&Pkt)) 
 			continue;
-
 		// ok, we got a packet
 		//print_packet(&Pkt);
 		// when we send a packet, we wait until we get an ACK to put us to sleep.
+		// we only wait a maximum of two minutes
 		while (!do_sleep){
 //			printf("got pkt\r\n");
 			while(!ble_connected) {
@@ -1367,17 +1292,14 @@ void main()
 //			printf("send pkt\r\n");
 			// send the data packet
 			print_packet(&Pkt);
-			// if we have sent a number of packets and still have not got an ACK, time to sleep.  We keep trying for up to a minute.
-/*			if((getMs() - pkt_time) >= 60000) {
-				do_sleep = 1;
-				break;
-			}
-			*/	
-			// wait 5 seconds, listenting for the ACK.
+			// wait 10 seconds, listenting for the ACK.
 //			printf("waiting for ack\r\n");
-			waitDoingServices(5000, 0, 1);
+			waitDoingServices(10000, 0, 1);
 			
 			// if we got the ACK, get out of the loop.
+			// if we have sent a number of packets and still have not got an ACK, time to sleep.  We keep trying for up to 3 minutes.
+			if((getMs() - pkt_time) >= 180000)
+				do_sleep = 1;
 		}
 		//packet_captured = 0;
 			
@@ -1394,6 +1316,8 @@ void main()
 			uint8 savedP0DIR = P0DIR;
 			uint8 savedP1SEL = P1SEL;
 			uint8 savedP1DIR = P1DIR;
+			// clear sent_beacon so we send it next time we wake up.
+			sent_beacon = 0;
 			// turn of the RF Frequency Synthesiser.
 			RFST = 4;   //SIDLE
 			// turn all wixel LEDs on
@@ -1420,7 +1344,7 @@ void main()
 			// sleep for around 300s
 //			printf("sleeping\r\n");
 			radioMacSleep();
-			goToSleep(200);   //
+			goToSleep(275);   //
 			radioMacResume();
 			// reset the UART
 			openUart();
@@ -1441,6 +1365,8 @@ void main()
 			// Without this, we USBCIF.SUSPENDIF will not get set (the datasheet is incomplete).
 			USBCIE = 0b0111;
 //			printf("awake!\r\n");
+			//reset the radio registers
+			//setRadioRegistersInitFunc(dex_RadioSettings);
 			// bootstrap radio again
 			//radioMacInit();
 			// tell the radio to remain IDLE when the next packet is recieved.
@@ -1452,8 +1378,6 @@ void main()
 			// delayMs(50);    //wait for reset
 			// clear do_sleep, cause we have just woken up.
 			do_sleep = 0;
-			// clear sent_beacon so we send it next time we wake up.
-			sent_beacon = 0;
 			// power on the BLE module
 //			printf("ble on\r\n");
 			setDigitalOutput(10,HIGH);
